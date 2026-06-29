@@ -118,3 +118,4 @@ nvim --headless "+Lazy! sync" +qa
 success "Plugins installed."
 
 echo "Neovim setup complete."
+
