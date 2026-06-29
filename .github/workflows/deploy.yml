@@ -3,7 +3,7 @@ name: Deploy Install Script
 on:
   push:
     branches:
-      - main
+      - master
     paths:
       - 'install.sh'
 
