@@ -44,6 +44,34 @@ if ! command -v curl >/dev/null 2>&1; then
     packages+=("curl")
 fi
 
+info "Checking clipboard support..."
+
+clipboard_package=""
+
+if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    if command -v wl-copy >/dev/null 2>&1; then
+        success "Wayland clipboard found."
+    else
+        warning "Wayland clipboard missing."
+        clipboard_package="wl-clipboard"
+    fi
+elif [[ -n "${DISPLAY:-}" ]]; then
+    if command -v xclip >/dev/null 2>&1; then
+        success "X11 clipboard found."
+    elif command -v xsel >/dev/null 2>&1; then
+        success "X11 clipboard found."
+    else
+        warning "X11 clipboard missing."
+        clipboard_package="xclip"
+    fi
+else
+    warning "No graphical session detected. Skipping clipboard provider."
+fi
+
+if [[ -n "$clipboard_package" ]]; then
+    packages+=("$clipboard_package")
+fi
+
 if [[ ${#packages[@]} -gt 0 ]]; then
     info "Installing missing packages..."
 
