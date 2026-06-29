@@ -117,4 +117,4 @@ info "Installing plugins..."
 nvim --headless "+Lazy! sync" +qa
 success "Plugins installed."
 
-echo "Neovim setup complete. Run: nvim"
+echo "Neovim setup complete."
