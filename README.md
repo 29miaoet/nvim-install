@@ -1,4 +1,4 @@
 ## Nvim Install
 ```bash
-curl -fsSL https://raw.githubusercontent.com/29miaoet/nvim-install/refs/heads/master/install.sh | bash
+curl -fsSL https://29miaoet.github.io/nvim-install/install.sh | bash
 ```
