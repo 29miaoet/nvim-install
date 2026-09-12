@@ -1,299 +1,276 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# ============================================================================
+#  install.sh — full Neovim installer for Ubuntu Linux
+#  Config source: https://github.com/29miaoet/nvim-install (master branch)
+#
+#  Pipeable:
+#    curl -fsSL \
+#      https://raw.githubusercontent.com/29miaoet/nvim-install/refs/heads/master/install.sh \
+#      | bash
+#
+#  What it does, in order:
+#    1. Validates sudo ONCE, up front (later sudo calls reuse the cached ticket)
+#    2. Checks prerequisites (apt-installs git ONLY if missing — lazy.nvim
+#       needs it; nothing else is ever installed)
+#    3. Downloads the latest STABLE Neovim tarball from GitHub into /usr/local
+#    4. Replaces ~/.config/nvim with init.lua + plugin specs from this repo
+#    5. Runs headless "Lazy! sync" so plugins are pre-installed
+#    6. Appends "alias vim='nvim'" to ~/.bashrc (no duplicates on re-run)
+#
+#  Every step logs to the terminal; any unexpected failure aborts with the
+#  failing line, command, and exit code.
+# ============================================================================
 
-REPO_RAW="https://raw.githubusercontent.com/29miaoet/nvim-install/refs/heads/master"
-CONFIG_DIR="$HOME/.config/nvim"
+set -Eeuo pipefail
 
-info() {
-    echo "[INFO] $1"
-}
+# ---------------------------------------------------------------------------
+# Settings — edit these to change behaviour
+# ---------------------------------------------------------------------------
 
-success() {
-    echo "[DONE] $1"
-}
+# true  -> existing ~/.config/nvim is moved to ~/.config/nvim.backup.<timestamp>
+# false -> existing ~/.config/nvim is deleted outright        (current default)
+BACKUP_EXISTING_CONFIG=false
 
-warning() {
-    echo "[WARN] $1"
-}
-
-error() {
-    echo "[ERROR] $1"
-    exit 1
-}
-
-info "Checking operating system..."
-
-if [[ "$(uname -s)" != "Linux" ]]; then
-    error "This installer is intended for Linux."
-fi
-
-if ! command -v apt >/dev/null 2>&1; then
-    error "apt not found. This installer currently supports Debian/Ubuntu-based Linux distributions."
-fi
-
-if ! command -v sudo >/dev/null 2>&1; then
-    error "sudo is required to install system packages."
-fi
-
-info "Checking dependencies..."
-
-packages=()
-
-# Core tools
-
-if command -v nvim >/dev/null 2>&1; then
-    success "Neovim found: $(nvim --version | head -n1)"
-else
-    warning "Neovim missing."
-    packages+=("neovim")
-fi
-
-if command -v git >/dev/null 2>&1; then
-    success "Git found: $(git --version)"
-else
-    warning "Git missing."
-    packages+=("git")
-fi
-
-if command -v curl >/dev/null 2>&1; then
-    success "curl found."
-else
-    warning "curl missing."
-    packages+=("curl")
-fi
-
-# Node.js / npm
-
-if command -v node >/dev/null 2>&1; then
-    success "Node.js found: $(node --version)"
-else
-    warning "Node.js missing."
-    packages+=("nodejs")
-fi
-
-if command -v npm >/dev/null 2>&1; then
-    success "npm found: $(npm --version)"
-else
-    warning "npm missing."
-    packages+=("npm")
-fi
-
-# Python
-
-if command -v python3 >/dev/null 2>&1; then
-    success "Python found: $(python3 --version)"
-else
-    warning "Python missing."
-    packages+=("python3")
-fi
-
-# C/C++ development tools
-
-if command -v g++ >/dev/null 2>&1; then
-    success "g++ found: $(g++ --version | head -n1)"
-else
-    warning "g++ missing."
-    packages+=("g++")
-fi
-
-if command -v make >/dev/null 2>&1; then
-    success "make found."
-else
-    warning "make missing."
-    packages+=("make")
-fi
-
-# Clipboard support
-
-info "Checking clipboard support..."
-
-clipboard_packages=()
-
-if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
-    if command -v wl-copy >/dev/null 2>&1; then
-        success "Wayland clipboard found."
-    else
-        warning "Wayland clipboard missing."
-        clipboard_packages+=("wl-clipboard")
-    fi
-
-elif [[ -n "${DISPLAY:-}" ]]; then
-    if command -v xclip >/dev/null 2>&1; then
-        success "X11 clipboard found: xclip"
-    elif command -v xsel >/dev/null 2>&1; then
-        success "X11 clipboard found: xsel"
-    else
-        warning "X11 clipboard missing."
-        clipboard_packages+=("xclip")
-    fi
-
-else
-    warning "No graphical session detected. Skipping clipboard provider."
-fi
-
-packages+=("${clipboard_packages[@]}")
-
-# xdg-open
-
-if command -v xdg-open >/dev/null 2>&1; then
-    success "xdg-open found."
-else
-    warning "xdg-open missing."
-    packages+=("xdg-utils")
-fi
-
-# Install missing apt packages
-
-if [[ ${#packages[@]} -gt 0 ]]; then
-    info "Installing missing packages..."
-
-    # Remove duplicate package names.
-    mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
-
-    sudo apt update
-    sudo apt install -y "${packages[@]}"
-
-    success "System dependencies installed."
-else
-    success "All system dependencies available."
-fi
-
-# Verify required commands
-
-info "Verifying required commands..."
-
-required_commands=(
-    nvim
-    git
-    curl
-    node
-    npm
-    python3
-    g++
-    make
+# Plugin spec files pulled from <repo>/lua/plugins/<name>.lua
+# NOTE: "treesitter" is intentionally omitted — compiling its parsers needs a
+# C compiler, and this script deliberately installs no toolchains.
+# To re-enable later: add "treesitter" to this list (and install gcc yourself).
+PLUGINS=(
+  colorizer
+  colorscheme
+  markdown-preview
+  multicursor
 )
 
-for command_name in "${required_commands[@]}"; do
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        error "Required command not found after installation: $command_name"
-    fi
-done
+REPO_RAW_BASE="https://raw.githubusercontent.com/29miaoet/nvim-install/refs/heads/master"
+NVIM_RELEASE_BASE="https://github.com/neovim/neovim/releases/download/stable"
+CONFIG_DIR="${HOME}/.config/nvim"
 
-success "Required commands verified."
+# ---------------------------------------------------------------------------
+# Logging helpers — everything this script does is echoed to the terminal
+# ---------------------------------------------------------------------------
+log()  { printf '\033[1;32m[ OK   ]\033[0m %s\n' "$*"; }
+info() { printf '\033[1;36m[ INFO ]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[ WARN ]\033[0m %s\n' "$*"; }
+err()  { printf '\033[1;31m[ FAIL ]\033[0m %s\n' "$*" >&2; }
 
-# Install global Node.js development tools
+on_error() {
+  local code="$1" line="$2" cmd="$3"
+  err "Line ${line}: '${cmd}' failed (exit code ${code})."
+  err "Aborting."
+  exit "${code}"
+}
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
-info "Checking TypeScript..."
-
-if command -v tsc >/dev/null 2>&1; then
-    success "TypeScript found: $(tsc --version)"
-else
-    warning "TypeScript missing."
-    info "Installing TypeScript globally..."
-
-    sudo npm install -g typescript
-
-    success "TypeScript installed."
-fi
-
-info "Checking TypeScript LSP support..."
-
-if tsc --help 2>/dev/null | grep -q -- "--lsp"; then
-    success "TypeScript native LSP detected."
-else
-    warning "Installed TypeScript does not expose --lsp."
-    warning "TypeScript 7 or newer is required for tsc --lsp --stdio."
-fi
-
-# Install tsx
-
-if command -v tsx >/dev/null 2>&1; then
-    success "tsx found: $(tsx --version 2>/dev/null || true)"
-else
-    warning "tsx missing."
-    info "Installing tsx globally..."
-
-    sudo npm install -g tsx
-
-    success "tsx installed."
-fi
-
-# Install basedpyright
-
-if command -v basedpyright-langserver >/dev/null 2>&1; then
-    success "basedpyright found."
-else
-    warning "basedpyright missing."
-    info "Installing basedpyright..."
-
-    python3 -m pip install --user basedpyright
-
-    success "basedpyright installed."
-fi
-
-# Backup existing Neovim configuration
-
-if [[ -e "$CONFIG_DIR" ]]; then
-    BACKUP="${CONFIG_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
-
-    warning "Existing config found. Backing up to $BACKUP"
-    mv "$CONFIG_DIR" "$BACKUP"
-fi
-
-mkdir -p "$CONFIG_DIR/lua/plugins"
-
-# Download configuration
-
-download() {
-    local url="$1"
-    local dest="$2"
-
-    info "Downloading $(basename "$dest")"
-
-    if ! curl -fsSL "$url" -o "$dest"; then
-        error "Failed downloading $url"
-    fi
+fetch() {
+  # fetch <url> <destination> <label> — verbose download with a clear failure
+  local url="$1" dest="$2" label="$3"
+  info "Downloading ${label}"
+  info "    ${url}"
+  if ! curl -fsSL --retry 3 --retry-delay 2 "${url}" -o "${dest}"; then
+    err "Failed to download ${label}"
+    err "    URL: ${url}"
+    err "Check your connection, and that the file exists on 'master' of"
+    err "https://github.com/29miaoet/nvim-install"
+    exit 1
+  fi
+  log "Saved ${label} -> ${dest} ($(du -h "${dest}" | cut -f1))"
 }
 
-download "$REPO_RAW/init.lua" \
-    "$CONFIG_DIR/init.lua"
+# ---------------------------------------------------------------------------
+# Start
+# ---------------------------------------------------------------------------
+[[ -n "${HOME}" ]] || { err "HOME is not set — aborting."; exit 1; }
 
-download "$REPO_RAW/lazy-lock.json" \
-    "$CONFIG_DIR/lazy-lock.json"
-
-download "$REPO_RAW/lua/plugins/colorscheme.lua" \
-    "$CONFIG_DIR/lua/plugins/colorscheme.lua"
-
-success "Configuration installed."
-
-# Install Neovim plugins
-
-info "Installing plugins..."
-
-if ! nvim --headless "+Lazy! sync" +qa; then
-    error "Plugin installation failed."
+info "nvim-install started: $(date '+%Y-%m-%d %H:%M:%S')"
+info "User:   $(id -un) (uid ${EUID})"
+info "Host:   $(uname -sr) ($(uname -m))"
+if [[ -r /etc/os-release ]]; then
+  . /etc/os-release
+  info "Distro: ${PRETTY_NAME:-unknown}"
 fi
 
-success "Plugins installed."
+WORKDIR="$(mktemp -d)"
+trap 'info "Cleaning up temp dir ${WORKDIR}"; rm -rf "${WORKDIR}"' EXIT
+info "Temp working dir: ${WORKDIR}"
 
-# Final verification
-info "Running Neovim health check..."
-
-if nvim --headless "+checkhealth" +qa >/dev/null 2>&1; then
-    success "Neovim health check completed."
+# --- sudo: validate credentials exactly once, up front ----------------------
+if [[ ${EUID} -eq 0 ]]; then
+  SUDO=""
+  log "Running as root — sudo not required."
 else
-    warning "Neovim health check reported issues."
+  command -v sudo >/dev/null 2>&1 || {
+    err "sudo is not available and this script is not running as root."
+    exit 1
+  }
+  info "Validating sudo credentials (single prompt; later sudo calls reuse the ticket)..."
+  sudo -v
+  log "sudo credentials validated."
 fi
 
-echo
-echo "Neovim setup complete."
-echo
-echo "Installed versions:"
-echo "  Neovim:    $(nvim --version | head -n1)"
-echo "  Node.js:   $(node --version)"
-echo "  npm:       $(npm --version)"
-echo "  TypeScript: $(tsc --version 2>/dev/null || echo 'unavailable')"
-echo "  Python:    $(python3 --version)"
-echo "  Git:       $(git --version)"
-echo
+as_root() {
+  if [[ -n "${SUDO}" ]]; then sudo "$@"; else "$@"; fi
+}
 
+# --- Prerequisites ------------------------------------------------------------
+for cmd in curl tar; do
+  if command -v "${cmd}" >/dev/null 2>&1; then
+    log "Prerequisite found: ${cmd} ($(command -v "${cmd}"))"
+  else
+    err "Required command '${cmd}' is not on PATH."
+    err "Install it first with: sudo apt-get install ${cmd}"
+    exit 1
+  fi
+done
+
+if command -v git >/dev/null 2>&1; then
+  log "Prerequisite found: git ($(git --version))"
+else
+  warn "git is missing — lazy.nvim cannot clone plugins without it."
+  info "Installing git via apt (the ONLY package this script will ever install)..."
+  as_root apt-get update
+  as_root apt-get install -y git
+  log "git installed: $(git --version)"
+fi
+
+# --- Neovim: latest stable tarball from GitHub --------------------------------
+ARCH="$(uname -m)"
+case "${ARCH}" in
+  x86_64)        ASSET="nvim-linux-x86_64.tar.gz" ;;
+  aarch64|arm64) ASSET="nvim-linux-aarch64.tar.gz" ;;
+  *)
+    err "Unsupported architecture '${ARCH}' — this script handles x86_64/aarch64 only."
+    exit 1
+    ;;
+esac
+
+TARBALL="${WORKDIR}/${ASSET}"
+info "Downloading latest stable Neovim release (${ASSET})..."
+info "    ${NVIM_RELEASE_BASE}/${ASSET}"
+if ! curl -fL --retry 3 --retry-delay 2 --progress-bar \
+      "${NVIM_RELEASE_BASE}/${ASSET}" -o "${TARBALL}"; then
+  # Releases before v0.10.4 named the x86_64 archive "nvim-linux64.tar.gz".
+  if [[ "${ARCH}" == "x86_64" ]]; then
+    warn "Primary asset failed — retrying legacy archive name nvim-linux64.tar.gz..."
+    ASSET="nvim-linux64.tar.gz"
+    TARBALL="${WORKDIR}/${ASSET}"
+    curl -fL --retry 3 --retry-delay 2 --progress-bar \
+      "${NVIM_RELEASE_BASE}/${ASSET}" -o "${TARBALL}" \
+      || { err "Could not download the Neovim stable tarball."; exit 1; }
+  else
+    err "Could not download a Neovim stable tarball for ${ARCH}."
+    exit 1
+  fi
+fi
+log "Neovim tarball saved: ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
+
+# Determine the archive's top-level directory (e.g. "nvim-linux-x86_64")
+TOPDIR="$(tar -tzf "${TARBALL}" | sed -n '1s#/.*##p')"
+if [[ -z "${TOPDIR}" || "${TOPDIR}" == "." ]]; then
+  err "Could not determine the archive's root directory — aborting."
+  exit 1
+fi
+info "Archive root: ${TOPDIR}/"
+
+info "Removing any previous install at /usr/local/${TOPDIR} ..."
+as_root rm -rf "/usr/local/${TOPDIR}"
+
+info "Extracting to /usr/local ..."
+as_root tar -xzf "${TARBALL}" -C /usr/local
+log "Neovim extracted to /usr/local/${TOPDIR}"
+
+info "Creating symlink /usr/local/bin/nvim -> /usr/local/${TOPDIR}/bin/nvim"
+as_root ln -sfn "/usr/local/${TOPDIR}/bin/nvim" "/usr/local/bin/nvim"
+
+NVIM_BIN="/usr/local/bin/nvim"
+NVIM_VERSION="$("${NVIM_BIN}" --version | head -n 1)"
+log "Neovim installed: ${NVIM_VERSION}"
+
+if command -v nvim >/dev/null 2>&1 && [[ "$(command -v nvim)" != "${NVIM_BIN}" ]]; then
+  warn "A different nvim is also on PATH: $(command -v nvim)"
+  warn "/usr/local/bin normally shadows it, but this shell's PATH may differ."
+fi
+
+# --- Configuration from this repository ----------------------------------------
+if [[ -d "${CONFIG_DIR}" ]]; then
+  if [[ "${BACKUP_EXISTING_CONFIG}" == "true" ]]; then
+    BACKUP_DIR="${CONFIG_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
+    info "Existing Neovim config found — backing it up to ${BACKUP_DIR}"
+    mv "${CONFIG_DIR}" "${BACKUP_DIR}"
+    log "Backup complete."
+  else
+    warn "Existing Neovim config found at ${CONFIG_DIR}."
+    warn "BACKUP_EXISTING_CONFIG=${BACKUP_EXISTING_CONFIG} — replacing it WITHOUT backup."
+    rm -rf "${CONFIG_DIR}"
+    log "Old config removed."
+  fi
+else
+  info "No existing config at ${CONFIG_DIR} — fresh install."
+fi
+
+info "Creating ${CONFIG_DIR}/lua/plugins ..."
+mkdir -p "${CONFIG_DIR}/lua/plugins"
+log "Directory structure created."
+
+fetch "${REPO_RAW_BASE}/init.lua" "${CONFIG_DIR}/init.lua" "init.lua"
+
+for plugin in "${PLUGINS[@]}"; do
+  fetch "${REPO_RAW_BASE}/lua/plugins/${plugin}.lua" \
+        "${CONFIG_DIR}/lua/plugins/${plugin}.lua" \
+        "plugin spec: ${plugin}.lua"
+done
+
+info "Installed config files:"
+find "${CONFIG_DIR}" | sort | sed 's#^#    #'
+
+# --- Plugin bootstrap -----------------------------------------------------------
+info "Launching headless Neovim to bootstrap lazy.nvim and sync plugins..."
+info "(First run also clones lazy.nvim itself — this can take a minute.)"
+if "${NVIM_BIN}" --headless "+Lazy! sync" +qa </dev/null; then
+  log "Plugin sync completed."
+else
+  warn "Headless plugin sync reported an error — continuing anyway."
+  warn "Plugins will be retried automatically on the first normal launch."
+fi
+
+# --- bashrc alias ----------------------------------------------------------------
+BASHRC="${HOME}/.bashrc"
+
+if [[ ! -f "${BASHRC}" ]]; then
+  warn "${BASHRC} does not exist — creating it."
+  touch "${BASHRC}"
+fi
+
+if grep -qsF "alias vim='nvim'" "${BASHRC}" \
+   || grep -qsF 'alias vim="nvim"' "${BASHRC}" \
+   || grep -qsF "alias vim=nvim" "${BASHRC}"; then
+  log "Alias 'vim' -> 'nvim' already present in ~/.bashrc — nothing to do."
+else
+  if grep -qsE "^[[:space:]]*alias[[:space:]]+vim=" "${BASHRC}"; then
+    warn "A different vim alias exists in ~/.bashrc — it will be overridden"
+    warn "by the appended one (bash uses the last definition in the file):"
+    grep -nE "^[[:space:]]*alias[[:space:]]+vim=" "${BASHRC}" | sed 's#^#    #'
+  else
+    info "Adding alias to ~/.bashrc..."
+  fi
+  {
+    printf '\n# Added by 29miaoet/nvim-install\n'
+    printf "alias vim='nvim'\n"
+  } >> "${BASHRC}"
+  log "Alias 'vim' -> 'nvim' appended to ~/.bashrc."
+fi
+
+# --- Done --------------------------------------------------------------------------
+echo
+log "=================== install complete ==================="
+log "Neovim:    ${NVIM_VERSION}"
+log "Binary:    ${NVIM_BIN} (symlink -> /usr/local/${TOPDIR}/bin/nvim)"
+log "Config:    ${CONFIG_DIR} (init.lua + ${#PLUGINS[@]} plugin specs)"
+log "Plugins:   ${PLUGINS[*]}"
+log "Alias:     vim -> nvim (in ~/.bashrc)"
+log "Finished:  $(date '+%Y-%m-%d %H:%M:%S')"
+echo
+info "The 'vim' alias is active in NEW terminals."
+info "To use it immediately:  source ~/.bashrc"
+info "Run <leader>r inside nvim to execute the open file (best effort —"
+info "needs python3 / node / tsx / g++ / xdg-open on PATH per filetype)."
