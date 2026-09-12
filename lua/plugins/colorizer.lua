@@ -9,6 +9,7 @@ return {
         "typescript",
         "jsx",
         "tsx",
+        "lua",
     },
     opts = {
         options = {
@@ -21,4 +22,3 @@ return {
         },
     },
 }
-
