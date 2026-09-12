@@ -95,8 +95,8 @@ trap 'info "Cleaning up temp dir ${WORKDIR}"; rm -rf "${WORKDIR}"' EXIT
 info "Temp working dir: ${WORKDIR}"
 
 # --- sudo: validate credentials exactly once, up front ----------------------
+SUDO=""   # "" = run directly (root); "sudo" = prefix every privileged call
 if [[ ${EUID} -eq 0 ]]; then
-  SUDO=""
   log "Running as root — sudo not required."
 else
   command -v sudo >/dev/null 2>&1 || {
@@ -105,6 +105,7 @@ else
   }
   info "Validating sudo credentials (single prompt; later sudo calls reuse the ticket)..."
   sudo -v
+  SUDO="sudo"
   log "sudo credentials validated."
 fi
 
